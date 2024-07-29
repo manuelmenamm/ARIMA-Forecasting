@@ -1,0 +1,293 @@
+---
+self-contained: true
+format: html
+editor: visual
+params:
+  print_sol: true
+  hidden: false
+toc: true
+toc-location: left
+toc-depth: 6
+---
+
+```{r}
+#| echo: false
+#| warning: false
+library(fpp3)
+library(patchwork)
+```
+
+# The data
+
+The data consists in two quarterly time series: the quarterly unemployment rate and the quarterly inflation rate in Spain from 2002 to 2019
+
+```{r}
+sp_infl_unemp <- 
+  readr::read_csv("/Users/manuelmena/Documents/IE/Third Year/SEM 2 Junior/Forecasting for Time Series/Assignments/Groups/Quarterly.csv") %>% 
+  mutate(
+    Quarter = make_yearquarter(Year, Quarter)
+  ) %>% 
+  select(Quarter, qUR, qIR) %>% 
+  as_tsibble(index=Quarter)
+sp_infl_unemp
+```
+
+## 0. Depict both qIR and qUR, their timeplots, ACF plots and judge whether they are stationary or not.
+
+```{r}
+sp_infl_unemp %>% autoplot(qIR) + ggtitle("Inflation Rate - Spain - 2002 until 2019")
+sp_infl_unemp %>% autoplot(qUR) + ggtitle("Unemployment Rate - Spain - 2002 until 2019")
+
+sp_infl_unemp %>% ACF(qIR) %>% autoplot() + ggtitle("ACF of Inflation Rate")
+sp_infl_unemp %>% ACF(qUR) %>% autoplot() + ggtitle("ACF of Unemployment Rate")
+
+# Neither of the series are stationary, this is proven by the trends and the ACF plot
+```
+
+The time series are not stationary, there is clearly a trend present.
+
+------------------------------------------------------------------------
+
+## 1. Determine the order of differencing required to render each regressor stationary
+
+```{r}
+sp_infl_unemp =
+  sp_infl_unemp %>% mutate(qIR_sdiff = difference(qIR, 4),
+                           qUR_sdiff = difference(qUR, 4),
+                           qUR_diff = difference(qUR, 1),
+                           qIR_diff = difference(qIR, 1))
+
+sp_infl_unemp %>% autoplot(qIR_sdiff)
+sp_infl_unemp %>% ACF(qIR_sdiff) %>% autoplot()
+
+sp_infl_unemp %>% autoplot(qUR_sdiff)
+sp_infl_unemp %>% ACF(qUR_sdiff) %>% autoplot()
+
+sp_infl_unemp %>% autoplot(qUR_diff)
+sp_infl_unemp %>% ACF(qUR_diff) %>% autoplot()
+
+```
+
+Judging by the ACFs:
+
+-   For qIR, seasonal differencing of order 1 suffices to render the series stationary
+
+-   For qUR, seasonal differencing does not render stationary, as the problem lies within the trend component. Ordinary differencing 1 is required and provides sufficient stationarity.
+
+## 2. Fit the following variations of the base regression model:
+
+-   Model without differencing (model in levels).
+
+-   Model model differenced to the order of differences required to render qUR stationary (model in differences 1).
+
+-   Model differenced to the order of differences required to render qIR stationary (model in differences 2).
+
+    ```{r}
+    fit_levels = 
+      sp_infl_unemp %>% 
+      model(base_levels = TSLM(qIR ~ qUR))
+            #base_differences1 = TSLM(difference(qIR, 1) ~ difference(qUR,1)),
+            #base_difference2 = TSLM(difference(qIR, 4) ~ difference(qUR,4)))
+    fit_difference1 =
+      sp_infl_unemp %>% 
+      model(base_differences1 = TSLM(qIR_diff ~ qUR_diff))
+
+    fit_differences2 = 
+      sp_infl_unemp %>% 
+      model(base_differences2 = TSLM(qIR_sdiff ~ qUR_sdiff))
+    ```
+
+1.  Examining the residuals of all these models, could you tell which order of differencing is adequate for the model in differences?
+
+    ```{r}
+    fit_levels %>% gg_tsresiduals()
+    fit_difference1 %>% gg_tsresiduals()
+    fit_differences2 %>% gg_tsresiduals()
+
+    ```
+
+------------------------------------------------------------------------
+
+Looking at the ACFs, the first and second model have clearly not achieved stationarity, as the ACFs still show trend remaining in the data. The third model seems stationary, therefore this will be the one we use.
+
+------------------------------------------------------------------------
+
+2.  Examining again the residuals of the adequate model, could you tell which ARMA model is appropriate for the residuals of the model in differences?
+
+    ```{r}
+    resid <- fit_differences2 %>% augment()
+    resid %>% gg_tsdisplay(.innov, plot_type = "partial")
+    ```
+
+    Looking at the non-seasonal patterns from the ACF & PACF, both graphs are tailing off without a distinct significant cut-off before the first seasonal lag. This suggests the non-seasonal parameters are p=0 and q=0.
+
+    From a seasonal perspective, there are two interpretations:
+
+    1.  The ACF shows a cut-off after the first seasonal lag (lag 4). This implies a seasonal moving average component of order 1 (Q=1) with no seasonal autoregressive component (P=0).
+
+    2.  PACF has a cut-off after the third seasonal lag, lag 12, suggesting a seasonal autoregressive component of order 3 (P=3) with no seasonal moving average component (Q=0).
+
+    Thus the possible models:
+
+    -   ARIMA(0,0,0)(0,0,1)
+
+    -   ARIMA(0,0,0)(3,0,0)
+
+    Considering that these are the errors for the seasonal difference model, we have an ARIMA process for the errors, resulting in the following final models:
+
+    -   ARIMA(0,0,0)(0,1,1)
+
+    -   ARIMA(0,0,0)(3,1,0)
+
+## 3. Based on your conclusions from point 2, fit a linear regression model with ARIMA errors.
+
+### 3.1 Fit both the model or models you would propose as well as an automatically selected model
+
+```{r}
+fit_dyn_regr = 
+  sp_infl_unemp %>% model(
+    dyn_manual1 = ARIMA(qIR ~ qUR + pdq(0,0,0) + PDQ(3,1,0)),
+    dyn_manual2 = ARIMA(qIR ~ qUR + pdq(0,0,0) + PDQ(0,1,1)),
+    dyn_auto = ARIMA(qIR ~ qUR)
+  )
+
+#dyn_auto
+
+```
+
+### 3.2 Which of these models would you select and why?
+
+```{r}
+report(fit_dyn_regr %>% select(dyn_manual1))
+report(fit_dyn_regr %>% select(dyn_manual2))
+report(fit_dyn_regr %>% select(dyn_auto))
+
+glance(fit_dyn_regr) %>% arrange(AICc) %>% select(.model:BIC)
+
+fit_dyn_regr %>% 
+  select(dyn_manual2) %>% 
+  gg_tsresiduals()
+```
+
+------------------------------------------------------------------------
+
+The automatically fitted model is the same as our dyn_manual2, ARIMA(0,0,0)(0,1,1).
+
+The lowest AICc is achieved by the dyn_manual2/dyn_auto model, so we should select this, as it also has less parameters. The residuals show an approx. normal distribution, no autocorrelation and are more or less homoskedastic (could be debated, but generally look acceptable enough).
+
+------------------------------------------------------------------------
+
+# 4. Model qIR using ARIMA without any external regressors.
+
+## 4.1 Depict the ACF and PACF of the differenced qIR process that you consider stationary. Propose which models you would fit to it.
+
+```{r}
+sp_infl_unemp %>% 
+  gg_tsdisplay(qIR_sdiff, plot_type="partial", lag_max=36)
+```
+
+------------------------------------------------------------------------
+
+2.  Looking at the non-seasonal patterns from the ACF & PACF, both graphs are tailing off without a distinct significant cut-off before the first seasonal lag. This suggests the non-seasonal parameters are p=0 and q=0.
+
+    From a seasonal perspective, there are two interpretations:
+
+    1.  The ACF shows a cut-off after the first seasonal lag (lag 4). This implies a seasonal moving average component of order 1 (Q=1) with no seasonal autoregressive component (P=0).
+
+    2.  PACF has a cut-off after the third seasonal lag, lag 12, suggesting a seasonal autoregressive component of order 3 (P=3) with no seasonal moving average component (Q=0).
+
+    Thus the possible models:
+
+    -   ARIMA(0,0,0)(0,0,1)
+
+    -   ARIMA(0,0,0)(3,0,0)
+
+    Considering that these are the errors for the seasonal difference model, we have an ARIMA process for the errors, resulting in the following final models:
+
+    -   ARIMA(0,0,0)(0,1,1)
+
+    -   ARIMA(0,0,0)(3,1,0)
+
+------------------------------------------------------------------------
+
+## 4.2 Fit your manually proposed models along with the autoARIMA model
+
+```{r}
+arima_fits <-
+  sp_infl_unemp %>%
+  model(
+    arima_man1 = ARIMA(qIR ~ pdq(0,0,0) + PDQ(3,1,0)),
+    arima_man2 = ARIMA(qIR ~ pdq(0,0,0) + PDQ(0,1,1)),
+    arima_auto = ARIMA(qIR)
+  )
+```
+
+## 4.3 Which of these models would you select and why?
+
+```{r}
+report(arima_fits %>% select(arima_man1))
+report(arima_fits %>% select(arima_man2))
+report(arima_fits %>% select(arima_auto))
+
+glance(arima_fits) %>% arrange(AICc) %>% select(.model:BIC)
+
+arima_fits %>% 
+  select(arima_man2) %>% 
+  gg_tsresiduals()
+```
+
+------------------------------------------------------------------------
+
+The autoarima is the same as our arima_man2, ARIMA(0,0,0)(0,1,1) with drift.
+
+The lowest AICc is achieved by the arima_man2/autoarima model, so we should select this, as it also has less parameters. The residuals show an approx. normal distribution, no autocorrelation and are more or less homoskedastic (could be debated, but generally look acceptable enough)
+
+------------------------------------------------------------------------
+
+# 5. Compare your ARIMA and dynamic regression models in terms of cross-validation
+
+The smallest training dataset should leave out four years.
+
+Consider a forecast horizon of a year.
+
+Base your assessment on the metrics for a forecast horizon of h=4 (not on the averaged metrics)
+
+```{r}
+init_rows <- nrow(sp_infl_unemp) - (4*4) # 4 quarters * 4 Years
+
+init_rows <- as.integer(init_rows)
+sp_infl_unemp_cv <- 
+  sp_infl_unemp %>% 
+  stretch_tsibble(.init=init_rows, .step=1)
+
+ext_variables_cv <- 
+  new_data(sp_infl_unemp_cv, 4)
+
+ext_variables_cv <- 
+  ext_variables_cv %>%
+  left_join(sp_infl_unemp, by = "Quarter")
+
+fit_cv <- sp_infl_unemp_cv %>% 
+  model(
+    arima_manual_2 = ARIMA(qIR ~ pdq(0,0,0) + PDQ(0,1,1)),
+    dyn_regr_manual_2 = ARIMA(qIR ~ qUR  + pdq(0,0,0) + PDQ(0,1,1))
+    )
+
+forecast_cv <- fit_cv %>%
+  forecast(h = 4, ext_variables_cv)
+
+forecast_cv %>% accuracy(sp_infl_unemp)
+
+
+fit = sp_infl_unemp %>% model(arima_manual_2 = ARIMA(qIR ~ pdq(0,0,0) + PDQ(0,1,1)))
+fit %>% forecast(h = 12) %>% autoplot(sp_infl_unemp)
+
+```
+
+------------------------------------------------------------------------
+
+Based on the performance metrics provided, we favor the ARIMA model ("arima_manual_2"). According to the principle of model parsimony, we choose the straightforward "arima_manual_2" model, getting rid of the added complexity of an external regressor.
+
+Although the errors between the two models are quite comparable, there are instances where one model slightly outperforms the other based on specific metrics. But, there's no conclusive evidence that either model significantly surpasses the other overall.
+
+------------------------------------------------------------------------
